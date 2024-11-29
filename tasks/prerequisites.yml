@@ -1,0 +1,169 @@
+---
+# tasks file for roles/kubernetes
+- name: Install dependencies
+  ansible.builtin.apt:
+    name: "{{ kubernetes_prerequisites_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Disable swap
+  ansible.builtin.shell: swapoff -a
+  register: __cmd_res
+  changed_when: __cmd_res.rc != 0
+
+- name: Remove SWAP in fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '(.*)swap(.*)$'
+    line: '#\1swap\2'
+    backrefs: true
+
+- name: Install containerd
+  ansible.builtin.apt:
+    name: containerd
+    state: present
+
+- name: Create /etc/containerd directory
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: 0755
+
+# Check /etc/containerd/config.toml
+- name: Get checksum of containerd configuration /etc/containerd/config.toml
+  ansible.builtin.stat:
+    path: /etc/containerd/config.toml
+  register: __containerd_toml_checksum_config
+
+- name: Generate containerd config file /tmp/config.toml
+  ansible.builtin.shell: containerd config default > /tmp/config.toml
+  register: __containerd_config
+  changed_when: __containerd_config.rc != 0
+
+- name: Change cgroup conf /tmp/config.toml
+  ansible.builtin.lineinfile:
+    path: /tmp/config.toml
+    regexp: '^(.*)SystemdCgroup = false(.*)$'
+    line: '\1SystemdCgroup = true\2'
+    backrefs: true
+  changed_when: false
+
+- name: Get checksum of containerd configuration /tmp/config.toml
+  ansible.builtin.stat:
+    path: /tmp/config.toml
+  register: __containerd_toml_checksum_tmp
+
+- name: Verify if config file not exists
+  ansible.builtin.set_fact:
+    __containerd_toml_copy_action: "{{ __containerd_toml_checksum_config.stat.exists }}"
+
+- name: Verify if config file checksum and tmp file checksum are different
+  ansible.builtin.set_fact:
+    __containerd_toml_copy_action: "{{ false if __containerd_toml_checksum_tmp.stat.checksum != __containerd_toml_checksum_config.stat.checksum else true }}"
+  when: __containerd_toml_copy_action == True
+
+- name: Save containerd config file if checksum different
+  ansible.builtin.copy:
+    src: /tmp/config.toml
+    dest: /etc/containerd/config.toml
+    owner: root
+    group: root
+    mode: "0750"
+    remote_src: true
+  when: __containerd_toml_copy_action == false
+  notify: restart_containerd
+
+# End block check /etc/containerd/config.toml
+- name: Check if containerd module exists
+  ansible.builtin.stat:
+    path: /etc/modules-load.d/k8s.conf
+  register: __containerd_modules_conf_exists
+
+- name: Add containerd modules
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+- name: Create k8s.conf file if not exist
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+  when: not __containerd_modules_conf_exists.stat.exists
+  notify: restart_containerd
+
+- ansible.builtin.meta: flush_handlers
+
+- name: Ensure containerd is started
+  ansible.builtin.service:
+    name: containerd
+    state: started
+    enabled: true
+
+- ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: '1'
+    sysctl_set: true
+    state: present
+    reload: true
+  loop:
+    - "net.bridge.bridge-nf-call-ip6tables"
+    - "net.bridge.bridge-nf-call-iptables"
+    - "net.ipv4.ip_forward"
+
+- name: add a persistent file for sysctl config
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-k8s.conf
+    content: |
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.ipv4.ip_forward                 = 1
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Check if repo already exists
+  ansible.builtin.stat:
+    path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  register: __kubernetes_apt_key
+
+- name: Check if repo already exists
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list.d/kubernetes.list
+  register: __kubernetes_apt_source
+
+- name: Install the key
+  ansible.builtin.shell: "curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_minor_version }}/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg"
+  when: not __kubernetes_apt_key.stat.exists
+
+- name: Install the repo
+  ansible.builtin.shell: "echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_minor_version }}/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list"
+  when: not __kubernetes_apt_source.stat.exists
+  notify: update_apt_cache
+
+- ansible.builtin.meta: flush_handlers
+
+- name: Install Kubernetes packages
+  ansible.builtin.apt:
+    name: "{{ item }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  loop:
+    - "kubelet={{ kubernetes_version }}"
+    - "kubeadm={{ kubernetes_version }}"
+    - "kubectl={{ kubernetes_version }}"
+
+- name: Hold kubernetes packages
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl

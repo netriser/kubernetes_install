@@ -1,0 +1,50 @@
+- name: Get Ip address of the master
+  delegate_to: "{{ master_hostname }}"
+  shell: hostname -i | awk '{print $1}'
+  register: __master_ip_adress
+  changed_when: false
+
+- name: Check if master is initialized
+  uri:
+    url: "https://{{ __master_ip_adress.stdout }}:6443"
+    validate_certs: no
+    status_code: [403]
+  register: result
+  until: "result.status == 403"
+  retries: 20
+  delay: 5
+
+- name: Check and wait a master 
+  delegate_to: "{{ master_hostname }}"
+  shell: kubectl get nodes | grep " Ready"
+  register: __cmd_res
+  retries: 100
+  delay: 5
+  until: __cmd_res.stdout_lines | count > 0
+  changed_when: __cmd_res.rc != 0
+
+- name: Get token command
+  delegate_to: "{{ master_hostname }}"
+  command: kubeadm init phase upload-certs --upload-certs
+  register: __kubeadm_certs
+  when: ansible_hostname not in __cmd_res.stdout
+
+- name: Get command join command
+  delegate_to: "{{ master_hostname }}"
+  command: kubeadm token create --print-join-command
+  register: __kubeadm_join
+  when: ansible_hostname not in __cmd_res.stdout
+
+- name: Joining new worker to master
+  shell: "{{ __kubeadm_join.stdout_lines[0] }} --certificate-key {{ __kubeadm_certs.stdout_lines[2] }} --apiserver-advertise-address={{ ansible_default_ipv4.address }}"
+  when: 
+  - ansible_hostname not in __cmd_res.stdout
+  - "'master' not in ansible_hostname"
+
+- name: Joining new Control plane to master
+  shell: "{{ __kubeadm_join.stdout_lines[0] }} --certificate-key {{ __kubeadm_certs.stdout_lines[2] }} --control-plane --ignore-preflight-errors=NumCPU,Mem"
+  when: 
+  - ansible_hostname not in __cmd_res.stdout
+  - "'master' in ansible_hostname"
+
+

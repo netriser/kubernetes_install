@@ -1,0 +1,13 @@
+---
+# defaults file for roles/kubernetes
+kubernetes_prerequisites_packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg2
+  - lsb-release
+  - bridge-utils
+kubernetes_minor_version: "1.30"
+kubernetes_version: "{{ kubernetes_minor_version }}.3-1.1"
+kubernetes_cidr_pods: "10.200.0.0/16"
+master_hostname: "{{ groups['tag_Name_k8s_master_1'][0] }}"
