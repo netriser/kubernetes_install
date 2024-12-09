@@ -41,8 +41,17 @@
   - ansible_hostname not in __cmd_res.stdout
   - "'master' not in ansible_hostname"
 
+# Join new master to cluster
+- name: Get token command
+  delegate_to: "{{ master_hostname }}"
+  command: kubeadm init phase upload-certs --upload-certs
+  register: __kubeadm_certs_master
+  when: 
+  - ansible_hostname not in __cmd_res.stdout
+  - "'master' in ansible_hostname"
+
 - name: Joining new Control plane to master
-  shell: "{{ __kubeadm_join.stdout_lines[0] }} --certificate-key {{ __kubeadm_certs.stdout_lines[2] }} --control-plane --ignore-preflight-errors=NumCPU,Mem"
+  shell: "{{ __kubeadm_join.stdout_lines[0] }} --certificate-key {{ __kubeadm_certs_master.stdout_lines[2] }} --control-plane --ignore-preflight-errors=NumCPU,Mem"
   when: 
   - ansible_hostname not in __cmd_res.stdout
   - "'master' in ansible_hostname"
